@@ -1293,26 +1293,19 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     }
 
     ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
-                   "hls: publish: name='%s' type='%s'",
-                   v->name, v->type);
+                   "hls: publish: name='%s' type='%s'", v->name, v->type);
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
 
     if (ctx == NULL) {
-
         ctx = ngx_pcalloc(s->connection->pool, sizeof(ngx_rtmp_hls_ctx_t));
         ngx_rtmp_set_ctx(s, ctx, ngx_rtmp_hls_module);
-
     } else {
-
         f = ctx->frags;
         b = ctx->aframe;
-
         ngx_memzero(ctx, sizeof(ngx_rtmp_hls_ctx_t));
-
         ctx->frags = f;
         ctx->aframe = b;
-
         if (b) {
             b->pos = b->last = b->start;
         }
@@ -1327,30 +1320,28 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
         }
     }
 
-    if (ngx_strstr(v->name, "..")) {
+    if (ngx_strstr((u_char *)v->name, (char *)"..")) {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                       "hls: bad stream name: '%s'", v->name);
         return NGX_ERROR;
     }
 
+    /* ----- hashed directory name from publish name (secret key) ----- */
     ngx_md5_t   md5;
     u_char      md5_bin[16];
     static u_char hexdig[] = "0123456789abcdef";
 
-    /* the RTMP publish name is the secret key */
-    ngx_str_t key = s->name;     /* if your code uses v->name for the key, use that instead */
+    /* convert v->name (C string) to ngx_str_t */
+    ngx_str_t key;
+    key.data = (u_char *) v->name;
+    key.len  = ngx_strlen(key.data);
 
     ngx_md5_init(&md5);
     ngx_md5_update(&md5, key.data, key.len);
     ngx_md5_final(md5_bin, &md5);
 
-    /* ---- choose whether to prefix with app/ ---- */
-    /* set prefix_len = 0 if you do NOT want the app prefix */
-    ngx_str_t app = s->app;
-    size_t    hash_hex_len  = 32;                      /* 16 bytes -> 32 hex */
-    size_t    prefix_len    = app.len;                 /* 0 for no prefix */
-    size_t    total_name_len = prefix_len ? (prefix_len + 1 + hash_hex_len)  /* "app/<hash>" */
-                                          : hash_hex_len;                     /* "<hash>" */
+    size_t hash_hex_len   = 32;   /* 16 bytes -> 32 hex */
+    size_t total_name_len = hash_hex_len; /* no app prefix here */
 
     ctx->name.len  = total_name_len;
     ctx->name.data = ngx_palloc(s->connection->pool, ctx->name.len + 1);
@@ -1360,20 +1351,14 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 
     u_char *q = ctx->name.data;
 
-    /* optional app/ prefix */
-    if (prefix_len) {
-        q = ngx_cpymem(q, app.data, app.len);
-        *q++ = '/';
-    }
-
-    /* hex-encode MD5 into ctx->name */
+    /* hex-encode MD5 */
     for (int i = 0; i < 16; i++) {
         *q++ = hexdig[md5_bin[i] >> 4];
         *q++ = hexdig[md5_bin[i] & 0x0F];
     }
     *q = '\0';
 
-    /* build playlist path length with the new ctx->name */
+    /* ----- build playlist/stream paths using ctx->name ----- */
     len = hacf->path.len + 1 + ctx->name.len + sizeof(".m3u8");
     if (hacf->nested) {
         len += sizeof("/index") - 1;
@@ -1386,7 +1371,6 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
         *p++ = '/';
     }
 
-    /* append ctx->name (now "app/<md5>" or just "<md5>") */
     p = ngx_cpymem(p, ctx->name.data, ctx->name.len);
     ctx->stream.len = p - ctx->playlist.data + 1;
     ctx->stream.data = ngx_palloc(s->connection->pool,
@@ -1396,35 +1380,33 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     ngx_memcpy(ctx->stream.data, ctx->playlist.data, ctx->stream.len - 1);
     ctx->stream.data[ctx->stream.len - 1] = (hacf->nested ? '/' : '-');
 
-    /* varint playlist path */
-
+    /* variant playlist path selection */
     if (hacf->variant) {
         var = hacf->variant->elts;
         for (n = 0; n < hacf->variant->nelts; n++, var++) {
             if (ctx->name.len > var->suffix.len &&
                 ngx_memcmp(var->suffix.data,
                            ctx->name.data + ctx->name.len - var->suffix.len,
-                           var->suffix.len)
-                == 0)
+                           var->suffix.len) == 0)
             {
                 ctx->var = var;
 
                 len = (size_t) (p - ctx->playlist.data);
 
-                ctx->var_playlist.len = len - var->suffix.len + sizeof(".m3u8")
-                                        - 1;
+                ctx->var_playlist.len = len - var->suffix.len
+                                        + sizeof(".m3u8") - 1;
                 ctx->var_playlist.data = ngx_palloc(s->connection->pool,
                                                     ctx->var_playlist.len + 1);
 
                 pp = ngx_cpymem(ctx->var_playlist.data, ctx->playlist.data,
-                               len - var->suffix.len);
+                                len - var->suffix.len);
                 pp = ngx_cpymem(pp, ".m3u8", sizeof(".m3u8") - 1);
                 *pp = 0;
 
-                ctx->var_playlist_bak.len = ctx->var_playlist.len +
-                                            sizeof(".bak") - 1;
+                ctx->var_playlist_bak.len = ctx->var_playlist.len
+                                            + sizeof(".bak") - 1;
                 ctx->var_playlist_bak.data = ngx_palloc(s->connection->pool,
-                                                 ctx->var_playlist_bak.len + 1);
+                                                ctx->var_playlist_bak.len + 1);
 
                 pp = ngx_cpymem(ctx->var_playlist_bak.data,
                                 ctx->var_playlist.data,
@@ -1437,9 +1419,7 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
         }
     }
 
-
     /* playlist path */
-
     if (hacf->nested) {
         p = ngx_cpymem(p, "/index.m3u8", sizeof("/index.m3u8") - 1);
     } else {
@@ -1447,23 +1427,18 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
     }
 
     ctx->playlist.len = p - ctx->playlist.data;
-
     *p = 0;
 
-    /* playlist bak (new playlist) path */
-
+    /* playlist .bak path */
     ctx->playlist_bak.data = ngx_palloc(s->connection->pool,
                                         ctx->playlist.len + sizeof(".bak"));
     p = ngx_cpymem(ctx->playlist_bak.data, ctx->playlist.data,
                    ctx->playlist.len);
     p = ngx_cpymem(p, ".bak", sizeof(".bak") - 1);
-
     ctx->playlist_bak.len = p - ctx->playlist_bak.data;
-
     *p = 0;
 
-    /* key path */
-
+    /* key path (if encryption enabled) */
     if (hacf->keys) {
         len = hacf->key_path.len + 1 + ctx->name.len + 1 + NGX_INT64_LEN
               + sizeof(".key");
@@ -1499,7 +1474,6 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
 next:
     return next_publish(s, v);
 }
-
 
 static ngx_int_t
 ngx_rtmp_hls_close_stream(ngx_rtmp_session_t *s, ngx_rtmp_close_stream_t *v)
@@ -2070,7 +2044,7 @@ ngx_rtmp_hls_video(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ctx->video_cc = frame.cc;
 
-    ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+    ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                 "MEOW ^w^");
 
     return NGX_OK;
