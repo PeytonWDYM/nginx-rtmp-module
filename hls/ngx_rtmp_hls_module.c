@@ -10,6 +10,7 @@
 #include <ngx_rtmp_cmd_module.h>
 #include <ngx_rtmp_codec_module.h>
 #include "ngx_rtmp_mpegts.h"
+#include <ngx_md5.h>
 
 
 static ngx_rtmp_publish_pt              next_publish;
@@ -1332,15 +1333,47 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
         return NGX_ERROR;
     }
 
-    /* patched – always use the RTMP “app” name, not the secret key */
-    ctx->name.len = s->app.len;
+    ngx_md5_t   md5;
+    u_char      md5_bin[16];
+    static u_char hexdig[] = "0123456789abcdef";
+
+    /* the RTMP publish name is the secret key */
+    ngx_str_t key = s->name;     /* if your code uses v->name for the key, use that instead */
+
+    ngx_md5_init(&md5);
+    ngx_md5_update(&md5, key.data, key.len);
+    ngx_md5_final(md5_bin, &md5);
+
+    /* ---- choose whether to prefix with app/ ---- */
+    /* set prefix_len = 0 if you do NOT want the app prefix */
+    ngx_str_t app = s->app;
+    size_t    hash_hex_len  = 32;                      /* 16 bytes -> 32 hex */
+    size_t    prefix_len    = app.len;                 /* 0 for no prefix */
+    size_t    total_name_len = prefix_len ? (prefix_len + 1 + hash_hex_len)  /* "app/<hash>" */
+                                          : hash_hex_len;                     /* "<hash>" */
+
+    ctx->name.len  = total_name_len;
     ctx->name.data = ngx_palloc(s->connection->pool, ctx->name.len + 1);
     if (ctx->name.data == NULL) {
         return NGX_ERROR;
     }
-    ngx_memcpy(ctx->name.data, s->app.data, ctx->name.len);
-    ctx->name.data[ctx->name.len] = '\0';
 
+    u_char *q = ctx->name.data;
+
+    /* optional app/ prefix */
+    if (prefix_len) {
+        q = ngx_cpymem(q, app.data, app.len);
+        *q++ = '/';
+    }
+
+    /* hex-encode MD5 into ctx->name */
+    for (int i = 0; i < 16; i++) {
+        *q++ = hexdig[md5_bin[i] >> 4];
+        *q++ = hexdig[md5_bin[i] & 0x0F];
+    }
+    *q = '\0';
+
+    /* build playlist path length with the new ctx->name */
     len = hacf->path.len + 1 + ctx->name.len + sizeof(".m3u8");
     if (hacf->nested) {
         len += sizeof("/index") - 1;
@@ -1353,14 +1386,8 @@ ngx_rtmp_hls_publish(ngx_rtmp_session_t *s, ngx_rtmp_publish_t *v)
         *p++ = '/';
     }
 
+    /* append ctx->name (now "app/<md5>" or just "<md5>") */
     p = ngx_cpymem(p, ctx->name.data, ctx->name.len);
-
-    /*
-     * ctx->stream holds initial part of stream file path
-     * however the space for the whole stream path
-     * is allocated
-     */
-
     ctx->stream.len = p - ctx->playlist.data + 1;
     ctx->stream.data = ngx_palloc(s->connection->pool,
                                   ctx->stream.len + NGX_INT64_LEN +
@@ -2042,6 +2069,9 @@ ngx_rtmp_hls_video(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     }
 
     ctx->video_cc = frame.cc;
+
+    ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                "MEOW ^w^");
 
     return NGX_OK;
 }
